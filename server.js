@@ -46,6 +46,12 @@ async function monthlyUsage(req) {
   if (!req.db) return 0;
   const { count, error } = await req.db.from('campaigns').select('id', { count: 'exact', head: true }).eq('user_id', req.user.id).gte('created_at', monthStartISO());
   if (error) {
+    console.error('SUPABASE_USAGE_ERROR', {
+      code: error.code || '',
+      message: error.message || '',
+      details: error.details || '',
+      hint: error.hint || ''
+    });
     if (error.code === '42P01') return 0;
     throw error;
   }
@@ -56,18 +62,38 @@ function fallback(data) {
   return { headline:`${n}: una forma más fácil de conseguir lo que buscas`, emotional:`¿Buscas algo que realmente te dé ${d}? Conoce ${n} y descubre por qué puede ser justo lo que estabas buscando. ✨`, offer:`🔥 ${n} por ${p}. Una oportunidad para probar ${d}. Escríbenos hoy y pregunta por disponibilidad.`, direct:`Conoce ${n}. ${d}. Ideal para ${data.audience || 'personas que buscan calidad'}. Precio: ${p}. Escríbenos por WhatsApp.`, whatsapp:`Hola 👋 Vi ${n} y quiero más información. ¿Sigue disponible por ${p}? También quisiera saber cómo funciona la entrega.`, reel:`0–3s: muestra ${n} con una pregunta potente.\n3–8s: demuestra ${d}.\n8–12s: muestra ${p}.\n12–15s: “Escríbenos por WhatsApp y pide el tuyo”.`, audiences:[data.audience || 'Compradores interesados','Personas comparando opciones','Clientes que valoran precio y calidad'], cta:'Escríbenos por WhatsApp' };
 }
 
-app.get('/api/config', (req,res)=>res.json({
-  supabaseUrl,
-  supabaseAnonKey: supabasePublishableKey,
-  configured:Boolean(supabaseUrl && supabasePublishableKey && supabaseSecretKey)
-}));
+app.get('/api/config', (req,res)=>res.json({ supabaseUrl, supabaseAnonKey: supabasePublishableKey, configured:Boolean(supabaseUrl && supabasePublishableKey) }));
 app.get('/api/me', requireUser, async (req,res)=>{ const usage=await monthlyUsage(req); res.json({id:req.user.id,email:req.user.email,name:req.user.user_metadata?.full_name||req.user.user_metadata?.name||'',plan:'FREE',used:usage,limit:FREE_MONTHLY_LIMIT}); });
-app.get('/api/usage', requireUser, async (req,res)=>{ try { const used=await monthlyUsage(req); res.json({plan:'FREE',used,limit:FREE_MONTHLY_LIMIT,remaining:Math.max(0,FREE_MONTHLY_LIMIT-used)}); } catch(e){ res.status(500).json({error:'No se pudo consultar el uso.'}); }});
+app.get('/api/usage', requireUser, async (req,res)=>{
+  try {
+    const used=await monthlyUsage(req);
+    res.json({plan:'FREE',used,limit:FREE_MONTHLY_LIMIT,remaining:Math.max(0,FREE_MONTHLY_LIMIT-used)});
+  } catch(e) {
+    console.error('API_USAGE_ERROR', {
+      code: e?.code || '',
+      message: e?.message || '',
+      details: e?.details || '',
+      hint: e?.hint || ''
+    });
+    res.status(500).json({error:'No se pudo consultar el uso.'});
+  }
+});
 
 app.post('/api/generate', requireUser, async (req,res)=>{
   const data=req.body || {};
   if(!data.name && !data.description) return res.status(400).json({error:'Agrega el nombre o la descripción del producto.'});
-  let used; try { used=await monthlyUsage(req); } catch(e){ console.error(e); return res.status(500).json({error:'No se pudo comprobar tu límite.'}); }
+  let used;
+  try {
+    used=await monthlyUsage(req);
+  } catch(e) {
+    console.error('API_GENERATE_USAGE_ERROR', {
+      code: e?.code || '',
+      message: e?.message || '',
+      details: e?.details || '',
+      hint: e?.hint || ''
+    });
+    return res.status(500).json({error:'No se pudo comprobar tu límite.'});
+  }
   if(used >= FREE_MONTHLY_LIMIT) return res.status(402).json({error:`Has usado tus ${FREE_MONTHLY_LIMIT} campañas gratuitas de este mes. Ve a Planes para conocer las opciones PRO.`});
   if(!client) return res.json({ ...fallback(data), demo:true, usage:{used:used+1,limit:FREE_MONTHLY_LIMIT} });
   const content=[{type:'input_text',text:`Eres el director creativo de una agencia de performance marketing. Crea una campaña para este producto.\nProducto: ${data.name||''}\nPrecio: ${data.price||''}\nDescripción: ${data.description||''}\nPúblico: ${data.audience||''}\nObjetivo: ${data.goal||'ventas'}\nDevuelve SOLO JSON válido con estas claves: headline, emotional, offer, direct, whatsapp, reel, audiences (array de 3 strings), cta. No inventes características técnicas ni descuentos que no estén dados. Escribe en español latino. Sé persuasivo sin prometer resultados garantizados.` }];
@@ -105,4 +131,3 @@ app.delete('/api/campaigns/:id', requireUser, async (req,res)=>{ const {error}=a
 
 app.use((req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 app.listen(port,'0.0.0.0',()=>console.log(`AdMaker IA running on port ${port}`));
-
