@@ -15,6 +15,11 @@ const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || '';
 const supabaseAuth = supabaseUrl && supabasePublishableKey ? createClient(supabaseUrl, supabasePublishableKey) : null;
 const supabaseAdmin = supabaseUrl && supabaseSecretKey ? createClient(supabaseUrl, supabaseSecretKey) : null;
 const FREE_MONTHLY_LIMIT = 3;
+console.log('FINAL_SUPABASE_TEST', {
+  supabaseUrlConfigured: Boolean(supabaseUrl),
+  publishableKeyConfigured: Boolean(supabasePublishableKey),
+  secretKeyConfigured: Boolean(supabaseSecretKey)
+});
 
 app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -23,19 +28,35 @@ function tokenFrom(req) {
   const h = req.headers.authorization || '';
   return h.startsWith('Bearer ') ? h.slice(7) : '';
 }
-function dbFor() {
-  return supabaseAdmin;
+async function supabaseRest(pathname, options = {}) {
+  if (!supabaseUrl || !supabaseSecretKey) throw new Error('SUPABASE_SECRET_KEY no configurada');
+  const headers = {
+    apikey: supabaseSecretKey,
+    Authorization: `Bearer ${supabaseSecretKey}`,
+    'Content-Type': 'application/json',
+    ...(options.headers || {})
+  };
+  const response = await fetch(`${supabaseUrl}/rest/v1/${pathname}`, { ...options, headers });
+  const text = await response.text();
+  if (!response.ok) {
+    console.error('SUPABASE_REST_ERROR', JSON.stringify({ status: response.status, statusText: response.statusText, body: text.slice(0, 2000) }));
+    const err = new Error(`Supabase REST ${response.status}: ${text}`);
+    err.status = response.status;
+    err.body = text;
+    throw err;
+  }
+  return text ? JSON.parse(text) : null;
 }
+
 async function requireUser(req, res, next) {
   if (!supabaseAuth) return res.status(503).json({ error: 'La autenticación todavía no está configurada en Render.' });
-  if (!supabaseAdmin) return res.status(503).json({ error: 'Falta configurar SUPABASE_SECRET_KEY en Render.' });
+  if (!supabaseSecretKey) return res.status(503).json({ error: 'Falta configurar SUPABASE_SECRET_KEY en Render.' });
   const token = tokenFrom(req);
   if (!token) return res.status(401).json({ error: 'Inicia sesión para usar AdMaker IA.' });
   const { data, error } = await supabaseAuth.auth.getUser(token);
   if (error || !data?.user) return res.status(401).json({ error: 'Tu sesión expiró. Inicia sesión nuevamente.' });
   req.user = data.user;
   req.token = token;
-  req.db = dbFor();
   next();
 }
 function monthStartISO() {
@@ -43,16 +64,10 @@ function monthStartISO() {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString();
 }
 async function monthlyUsage(req) {
-  if (!req.db) return 0;
-  const { count, error } = await req.db.from('campaigns').select('id', { count: 'exact', head: true }).eq('user_id', req.user.id).gte('created_at', monthStartISO());
-  if (error) {
-    console.error('SUPABASE_USAGE_ERROR_RAW', String(error));
-    console.error('SUPABASE_USAGE_ERROR_JSON', JSON.stringify(error));
-    console.error('SUPABASE_USAGE_ERROR_OBJECT', error);
-    if (error.code === '42P01') return 0;
-    throw error;
-  }
-  return count || 0;
+  const userId = encodeURIComponent(req.user.id);
+  const start = encodeURIComponent(monthStartISO());
+  const rows = await supabaseRest(`campaigns?select=id&user_id=eq.${userId}&created_at=gte.${start}`);
+  return Array.isArray(rows) ? rows.length : 0;
 }
 function fallback(data) {
   const n=data.name || 'tu producto', p=data.price || 'precio especial', d=data.description || 'una solución pensada para facilitarte la vida';
@@ -60,7 +75,7 @@ function fallback(data) {
 }
 
 app.get('/api/config', (req,res)=>res.json({ supabaseUrl, supabaseAnonKey: supabasePublishableKey, configured:Boolean(supabaseUrl && supabasePublishableKey) }));
-app.get('/api/me', requireUser, async (req,res)=>{ const usage=await monthlyUsage(req); res.json({id:req.user.id,email:req.user.email,name:req.user.user_metadata?.full_name||req.user.user_metadata?.name||'',plan:'FREE',used:usage,limit:FREE_MONTHLY_LIMIT}); });
+app.get('/api/me', requireUser, async (req,res)=>{ try { const usage=await monthlyUsage(req); res.json({id:req.user.id,email:req.user.email,name:req.user.user_metadata?.full_name||req.user.user_metadata?.name||'',plan:'FREE',used:usage,limit:FREE_MONTHLY_LIMIT}); } catch(e) { console.error('API_ME_ERROR', String(e)); res.status(500).json({error:'No se pudo cargar tu cuenta.'}); } });
 app.get('/api/usage', requireUser, async (req,res)=>{
   try {
     const used=await monthlyUsage(req);
@@ -96,8 +111,7 @@ app.post('/api/generate', requireUser, async (req,res)=>{
     const r=await client.responses.create({model:'gpt-5.6-luna',input:[{role:'user',content}]});
     let raw=(r.output_text||'').replace(/^```json\s*/,'').replace(/```$/,'').trim();
     const result=JSON.parse(raw);
-    const { error } = await req.db.from('campaigns').insert({ user_id:req.user.id, name:data.name||'Sin nombre', product_price:data.price||'', description:data.description||'', audience:data.audience||'', goal:data.goal||'', result });
-    if(error) { console.error('DB_INSERT_ERROR',error); return res.status(500).json({error:'La campaña se generó, pero no se pudo guardar en tu historial.'}); }
+    try { await supabaseRest('campaigns', { method:'POST', headers:{ Prefer:'return=minimal' }, body:JSON.stringify({ user_id:req.user.id, name:data.name||'Sin nombre', product_price:data.price||'', description:data.description||'', audience:data.audience||'', goal:data.goal||'', result }) }); } catch(error) { console.error('DB_INSERT_ERROR', String(error)); return res.status(500).json({error:'La campaña se generó, pero no se pudo guardar en tu historial.'}); }
     res.json({...result,usage:{used:used+1,limit:FREE_MONTHLY_LIMIT}});
   } catch(e){ console.error(e); res.status(500).json({error:'No se pudo generar la campaña. Revisa la configuración de la API.'}); }
 });
@@ -120,8 +134,8 @@ app.post('/api/generate-image', requireUser, async (req,res)=>{
   } catch(e){ console.error('IMAGE_GENERATION_ERROR',e); res.status(500).json({error:e?.message||'No se pudo generar el creativo visual.'}); }
 });
 
-app.get('/api/campaigns', requireUser, async (req,res)=>{ const {data,error}=await req.db.from('campaigns').select('id,name,product_price,description,audience,goal,result,created_at').order('created_at',{ascending:false}).limit(50); if(error) return res.status(500).json({error:'No se pudo cargar el historial. Ejecuta el SQL de instalación en Supabase.'}); res.json(data||[]); });
-app.delete('/api/campaigns/:id', requireUser, async (req,res)=>{ const {error}=await req.db.from('campaigns').delete().eq('id',req.params.id).eq('user_id',req.user.id); if(error) return res.status(500).json({error:'No se pudo eliminar la campaña.'}); res.json({ok:true}); });
+app.get('/api/campaigns', requireUser, async (req,res)=>{ try { const rows=await supabaseRest('campaigns?select=id,name,product_price,description,audience,goal,result,created_at&user_id=eq.'+encodeURIComponent(req.user.id)+'&order=created_at.desc&limit=50'); res.json(rows||[]); } catch(e) { console.error('CAMPAIGNS_ERROR', String(e)); res.status(500).json({error:'No se pudo cargar el historial. Revisa la configuración de Supabase.'}); } });
+app.delete('/api/campaigns/:id', requireUser, async (req,res)=>{ try { await supabaseRest('campaigns?id=eq.'+encodeURIComponent(req.params.id)+'&user_id=eq.'+encodeURIComponent(req.user.id), { method:'DELETE', headers:{ Prefer:'return=minimal' } }); res.json({ok:true}); } catch(e) { console.error('DELETE_CAMPAIGN_ERROR', String(e)); res.status(500).json({error:'No se pudo eliminar la campaña.'}); } });
 
 app.use((req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 app.listen(port,'0.0.0.0',()=>console.log(`AdMaker IA running on port ${port}`));
