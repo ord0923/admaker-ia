@@ -10,8 +10,10 @@ const app = express();
 const port = process.env.PORT || 3000;
 const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || '';
-const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+const supabasePublishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || '';
+const supabaseAuth = supabaseUrl && supabasePublishableKey ? createClient(supabaseUrl, supabasePublishableKey) : null;
+const supabaseAdmin = supabaseUrl && supabaseSecretKey ? createClient(supabaseUrl, supabaseSecretKey) : null;
 const FREE_MONTHLY_LIMIT = 3;
 
 app.use(express.json({ limit: '15mb' }));
@@ -21,18 +23,19 @@ function tokenFrom(req) {
   const h = req.headers.authorization || '';
   return h.startsWith('Bearer ') ? h.slice(7) : '';
 }
-function dbFor(token) {
-  return createClient(supabaseUrl, supabaseKey, { global: { headers: { Authorization: `Bearer ${token}` } } });
+function dbFor() {
+  return supabaseAdmin;
 }
 async function requireUser(req, res, next) {
-  if (!supabase) return res.status(503).json({ error: 'La autenticación todavía no está configurada en Render.' });
+  if (!supabaseAuth) return res.status(503).json({ error: 'La autenticación todavía no está configurada en Render.' });
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Falta configurar SUPABASE_SECRET_KEY en Render.' });
   const token = tokenFrom(req);
   if (!token) return res.status(401).json({ error: 'Inicia sesión para usar AdMaker IA.' });
-  const { data, error } = await supabase.auth.getUser(token);
+  const { data, error } = await supabaseAuth.auth.getUser(token);
   if (error || !data?.user) return res.status(401).json({ error: 'Tu sesión expiró. Inicia sesión nuevamente.' });
   req.user = data.user;
   req.token = token;
-  req.db = dbFor(token);
+  req.db = dbFor();
   next();
 }
 function monthStartISO() {
@@ -53,7 +56,11 @@ function fallback(data) {
   return { headline:`${n}: una forma más fácil de conseguir lo que buscas`, emotional:`¿Buscas algo que realmente te dé ${d}? Conoce ${n} y descubre por qué puede ser justo lo que estabas buscando. ✨`, offer:`🔥 ${n} por ${p}. Una oportunidad para probar ${d}. Escríbenos hoy y pregunta por disponibilidad.`, direct:`Conoce ${n}. ${d}. Ideal para ${data.audience || 'personas que buscan calidad'}. Precio: ${p}. Escríbenos por WhatsApp.`, whatsapp:`Hola 👋 Vi ${n} y quiero más información. ¿Sigue disponible por ${p}? También quisiera saber cómo funciona la entrega.`, reel:`0–3s: muestra ${n} con una pregunta potente.\n3–8s: demuestra ${d}.\n8–12s: muestra ${p}.\n12–15s: “Escríbenos por WhatsApp y pide el tuyo”.`, audiences:[data.audience || 'Compradores interesados','Personas comparando opciones','Clientes que valoran precio y calidad'], cta:'Escríbenos por WhatsApp' };
 }
 
-app.get('/api/config', (req,res)=>res.json({ supabaseUrl, supabaseAnonKey: supabaseKey, configured:Boolean(supabaseUrl && supabaseKey) }));
+app.get('/api/config', (req,res)=>res.json({
+  supabaseUrl,
+  supabaseAnonKey: supabasePublishableKey,
+  configured:Boolean(supabaseUrl && supabasePublishableKey && supabaseSecretKey)
+}));
 app.get('/api/me', requireUser, async (req,res)=>{ const usage=await monthlyUsage(req); res.json({id:req.user.id,email:req.user.email,name:req.user.user_metadata?.full_name||req.user.user_metadata?.name||'',plan:'FREE',used:usage,limit:FREE_MONTHLY_LIMIT}); });
 app.get('/api/usage', requireUser, async (req,res)=>{ try { const used=await monthlyUsage(req); res.json({plan:'FREE',used,limit:FREE_MONTHLY_LIMIT,remaining:Math.max(0,FREE_MONTHLY_LIMIT-used)}); } catch(e){ res.status(500).json({error:'No se pudo consultar el uso.'}); }});
 
@@ -98,3 +105,4 @@ app.delete('/api/campaigns/:id', requireUser, async (req,res)=>{ const {error}=a
 
 app.use((req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 app.listen(port,'0.0.0.0',()=>console.log(`AdMaker IA running on port ${port}`));
+
