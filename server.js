@@ -217,12 +217,13 @@ async function syncUserSubscriptionFromMercadoPago(user) {
   const email = String(user?.email || '').trim();
   if (!email || !mercadopagoAccessToken) return { matched: false, reason: 'missing_email_or_token' };
   const catalog = await resolveMercadoPagoPlanCatalog();
-  const query = `/preapproval/search?status=authorized&payer_email=${encodeURIComponent(email)}&limit=100`;
+  const query = `/preapproval/search?payer_email=${encodeURIComponent(email)}&limit=100`;
   const data = await mercadoPagoGet(query);
   const results = Array.isArray(data?.results) ? data.results : [];
-  if (!results.length) return { matched: false, reason: 'no_authorized_subscription' };
+  const authorizedResults = results.filter(r => String(r?.status || '').toLowerCase() === 'authorized');
+  if (!authorizedResults.length) return { matched: false, reason: 'no_authorized_subscription' };
 
-  const ranked = results
+  const ranked = authorizedResults
     .map(sub => ({ sub, plan: planFromMercadoPagoPlanId(sub.preapproval_plan_id, catalog) }))
     .filter(x => x.plan !== 'FREE')
     .sort((a, b) => new Date(b.sub.date_created || 0) - new Date(a.sub.date_created || 0));
@@ -390,4 +391,3 @@ app.post('/api/mercadopago/webhook', async (req,res)=>{
 
 app.use((req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 app.listen(port,'0.0.0.0',()=>console.log(`AdMaker IA running on port ${port}`));
-
