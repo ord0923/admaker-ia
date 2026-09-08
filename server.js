@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import OpenAI from 'openai';
+import OpenAI, { toFile } from 'openai';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -61,31 +61,45 @@ No inventes características técnicas ni descuentos que no estén dados. Escrib
 });
 
 app.post('/api/generate-image', async (req,res)=>{
-  const {prompt}=req.body || {};
+  const {prompt, imageDataUrl}=req.body || {};
   if(!prompt) return res.status(400).json({error:'Falta el prompt.'});
   if(!client) return res.json({demo:true, imageDataUrl:null, message:'Añade OPENAI_API_KEY para activar imágenes IA.'});
   try{
-    const response = await client.images.generate({
-      model:'gpt-image-2',
-      prompt,
-      size:'1024x1024',
-      quality:'medium',
-      output_format:'webp'
-    });
+    let response;
+    if(imageDataUrl && imageDataUrl.startsWith('data:image/')){
+      const match=imageDataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/s);
+      if(!match) return res.status(400).json({error:'La imagen subida no tiene un formato válido.'});
+      const mime=match[1];
+      const ext=mime.split('/')[1].replace('jpeg','jpg');
+      const buffer=Buffer.from(match[2],'base64');
+      const file=await toFile(buffer, `producto.${ext}`, {type:mime});
+      response=await client.images.edit({
+        model:'gpt-image-2',
+        image:file,
+        prompt,
+        size:'1024x1024',
+        quality:'medium',
+        output_format:'webp'
+      });
+    } else {
+      response=await client.images.generate({
+        model:'gpt-image-2',
+        prompt,
+        size:'1024x1024',
+        quality:'medium',
+        output_format:'webp'
+      });
+    }
     const b64=response.data?.[0]?.b64_json;
     res.json({imageDataUrl:b64 ? `data:image/webp;base64,${b64}` : null});
   }catch(e){
-    console.error(e);
-    res.status(500).json({error:'No se pudo generar el creativo visual.'});
+    console.error('IMAGE_GENERATION_ERROR', e);
+    res.status(500).json({error:e?.message || 'No se pudo generar el creativo visual.'});
   }
 });
 
 app.get('/api/campaigns',(req,res)=>res.json(demoCampaigns));
 
-app.use((req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-app.listen(port, '0.0.0.0', () => {
-  console.log(`AdMaker IA running on port ${port}`);
+app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
+app.listen(port,()=>console.log(`AdMaker IA Pro: http://localhost:${port}`));
 });
