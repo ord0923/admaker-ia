@@ -46,12 +46,9 @@ async function monthlyUsage(req) {
   if (!req.db) return 0;
   const { count, error } = await req.db.from('campaigns').select('id', { count: 'exact', head: true }).eq('user_id', req.user.id).gte('created_at', monthStartISO());
   if (error) {
-    console.error('SUPABASE_USAGE_ERROR', {
-      code: error.code || '',
-      message: error.message || '',
-      details: error.details || '',
-      hint: error.hint || ''
-    });
+    console.error('SUPABASE_USAGE_ERROR_RAW', String(error));
+    console.error('SUPABASE_USAGE_ERROR_JSON', JSON.stringify(error));
+    console.error('SUPABASE_USAGE_ERROR_OBJECT', error);
     if (error.code === '42P01') return 0;
     throw error;
   }
@@ -69,12 +66,9 @@ app.get('/api/usage', requireUser, async (req,res)=>{
     const used=await monthlyUsage(req);
     res.json({plan:'FREE',used,limit:FREE_MONTHLY_LIMIT,remaining:Math.max(0,FREE_MONTHLY_LIMIT-used)});
   } catch(e) {
-    console.error('API_USAGE_ERROR', {
-      code: e?.code || '',
-      message: e?.message || '',
-      details: e?.details || '',
-      hint: e?.hint || ''
-    });
+    console.error('API_USAGE_ERROR_RAW', String(e));
+    console.error('API_USAGE_ERROR_JSON', JSON.stringify(e));
+    console.error('API_USAGE_ERROR_OBJECT', e);
     res.status(500).json({error:'No se pudo consultar el uso.'});
   }
 });
