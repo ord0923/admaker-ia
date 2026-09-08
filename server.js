@@ -100,6 +100,9 @@ async function accountState(userId) {
 }
 
 async function monthlyUsage(req) {
+  // Usage is based on every campaign generated this month, not on how many
+  // campaigns remain visible in History. Deleting a campaign therefore never
+  // restores a monthly generation credit.
   const userId = encodeURIComponent(req.user.id);
   const start = encodeURIComponent(monthStartISO());
   const rows = await supabaseRest(`campaigns?select=id&user_id=eq.${userId}&created_at=gte.${start}`);
@@ -418,8 +421,8 @@ app.post('/api/generate-image', requireUser, async (req,res)=>{
   } catch(e){ console.error('IMAGE_GENERATION_ERROR',e); res.status(500).json({error:e?.message||'No se pudo generar el creativo visual.'}); }
 });
 
-app.get('/api/campaigns', requireUser, async (req,res)=>{ try { const rows=await supabaseRest('campaigns?select=id,name,product_price,description,audience,goal,plan,result,created_at&user_id=eq.'+encodeURIComponent(req.user.id)+'&order=created_at.desc&limit=50'); res.json(rows||[]); } catch(e) { console.error('CAMPAIGNS_ERROR', String(e)); res.status(500).json({error:'No se pudo cargar el historial. Revisa la configuración de Supabase.'}); } });
-app.delete('/api/campaigns/:id', requireUser, async (req,res)=>{ try { await supabaseRest('campaigns?id=eq.'+encodeURIComponent(req.params.id)+'&user_id=eq.'+encodeURIComponent(req.user.id), { method:'DELETE', headers:{ Prefer:'return=minimal' } }); res.json({ok:true}); } catch(e) { console.error('DELETE_CAMPAIGN_ERROR', String(e)); res.status(500).json({error:'No se pudo eliminar la campaña.'}); } });
+app.get('/api/campaigns', requireUser, async (req,res)=>{ try { const rows=await supabaseRest('campaigns?select=id,name,product_price,description,audience,goal,plan,result,created_at&user_id=eq.'+encodeURIComponent(req.user.id)+'&order=created_at.desc&limit=100'); const visible=(rows||[]).filter(x=>!x?.result?._deleted); res.json(visible); } catch(e) { console.error('CAMPAIGNS_ERROR', String(e)); res.status(500).json({error:'No se pudo cargar el historial. Revisa la configuración de Supabase.'}); } });
+app.delete('/api/campaigns/:id', requireUser, async (req,res)=>{ try { const id=encodeURIComponent(req.params.id); const rows=await supabaseRest('campaigns?select=id,result&user_id=eq.'+encodeURIComponent(req.user.id)+'&id=eq.'+id+'&limit=1'); if(!rows?.length) return res.status(404).json({error:'Campaña no encontrada.'}); const result={...(rows[0].result||{}),_deleted:true,_deleted_at:new Date().toISOString()}; await supabaseRest('campaigns?id=eq.'+id+'&user_id=eq.'+encodeURIComponent(req.user.id), { method:'PATCH', headers:{ Prefer:'return=minimal' }, body:JSON.stringify({result}) }); res.json({ok:true,usage_preserved:true}); } catch(e) { console.error('DELETE_CAMPAIGN_ERROR', String(e)); res.status(500).json({error:'No se pudo eliminar la campaña.'}); } });
 
 // Mercado Pago Webhook: verifies Mercado Pago's HMAC signature, then fetches the
 // subscription/invoice from Mercado Pago before changing the user's plan.
