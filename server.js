@@ -181,6 +181,10 @@ async function processMercadoPagoWebhook(req) {
   const dataId = String(req.query['data.id'] || req.body?.data?.id || '');
   if (!dataId) return { ignored: true, reason: 'missing_data_id' };
 
+  if (dataId === '123456') {
+  return { simulated: true, type, data_id: dataId };
+}
+
   if (type === 'subscription_preapproval') {
     const subscription = await mercadoPagoGet(`/preapproval/${encodeURIComponent(dataId)}`);
     return saveSubscriptionFromMercadoPago(subscription);
