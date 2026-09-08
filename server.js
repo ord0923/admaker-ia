@@ -213,23 +213,63 @@ async function resolveMercadoPagoPlanCatalog(force = false) {
   return catalog;
 }
 
+function inferPlanFromSubscription(subscription, catalog = null) {
+  const byId = planFromMercadoPagoPlanId(subscription?.preapproval_plan_id, catalog);
+  if (byId !== 'FREE') return byId;
+
+  const amount = Number(subscription?.auto_recurring?.transaction_amount);
+  if (amount === 29900) return 'PRO';
+  if (amount === 79900) return 'BUSINESS';
+
+  const reason = normalizeText(subscription?.reason);
+  if (reason === normalizeText(MERCADOPAGO_PRO_PLAN_NAME)) return 'PRO';
+  if (reason === normalizeText(MERCADOPAGO_BUSINESS_PLAN_NAME)) return 'BUSINESS';
+  return 'FREE';
+}
+
 async function syncUserSubscriptionFromMercadoPago(user) {
   const email = String(user?.email || '').trim();
   if (!email || !mercadopagoAccessToken) return { matched: false, reason: 'missing_email_or_token' };
-  const catalog = await resolveMercadoPagoPlanCatalog();
+  const catalog = await resolveMercadoPagoPlanCatalog(true);
   const query = `/preapproval/search?payer_email=${encodeURIComponent(email)}&limit=100`;
   const data = await mercadoPagoGet(query);
   const results = Array.isArray(data?.results) ? data.results : [];
   const authorizedResults = results.filter(r => String(r?.status || '').toLowerCase() === 'authorized');
   if (!authorizedResults.length) return { matched: false, reason: 'no_authorized_subscription' };
 
-  const ranked = authorizedResults
-    .map(sub => ({ sub, plan: planFromMercadoPagoPlanId(sub.preapproval_plan_id, catalog) }))
+  // Mercado Pago's search response normally includes preapproval_plan_id, but
+  // we also fetch the full subscription when that field is missing so we can
+  // reliably resolve the plan. As a final fallback, infer the plan from the
+  // recurring amount because our PRO/BUSINESS prices are unique.
+  const candidates = [];
+  for (const item of authorizedResults) {
+    let sub = item;
+    if (!sub.preapproval_plan_id || !sub.auto_recurring?.transaction_amount) {
+      try {
+        const full = await mercadoPagoGet(`/preapproval/${encodeURIComponent(item.id)}`);
+        if (full?.id) sub = { ...item, ...full };
+      } catch (e) {
+        console.warn('MP_SUBSCRIPTION_DETAIL_ERROR', String(e));
+      }
+    }
+    const plan = inferPlanFromSubscription(sub, catalog);
+    candidates.push({ sub, plan });
+  }
+
+  const ranked = candidates
     .filter(x => x.plan !== 'FREE')
     .sort((a, b) => new Date(b.sub.date_created || 0) - new Date(a.sub.date_created || 0));
 
   if (!ranked.length) {
-    console.warn('MP_SUBSCRIPTION_UNRECOGNIZED_PLAN', JSON.stringify({ email: '[oculto]', candidates: results.map(r => String(r.preapproval_plan_id || '')).filter(Boolean) }));
+    console.warn('MP_SUBSCRIPTION_UNRECOGNIZED_PLAN', JSON.stringify({
+      email: '[oculto]',
+      candidates: candidates.map(x => ({
+        id: String(x.sub?.id || ''),
+        preapproval_plan_id: String(x.sub?.preapproval_plan_id || ''),
+        amount: Number(x.sub?.auto_recurring?.transaction_amount || 0),
+        reason: String(x.sub?.reason || '')
+      }))
+    }));
     return { matched: false, reason: 'unrecognized_plan' };
   }
 
