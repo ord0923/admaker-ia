@@ -1,30 +1,20 @@
-# AdMaker IA Pro
+# AdMaker IA — versión completa
 
-MVP full-stack para convertir la foto y datos de un producto en una campaña publicitaria.
+Esta versión incluye cuentas con Supabase, historial persistente por usuario, límite FREE mensual, recuperación de contraseña, generador de campañas, generación de imágenes usando la foto del producto y planes.
 
-## Incluye
-- Dashboard SaaS
-- Generación real de copy con OpenAI Responses API
-- Entrada multimodal: texto + imagen del producto
-- Generación de un creativo visual con el endpoint de imágenes
-- Historial local de campañas
-- Planes Free / Pro / Business (interfaz; cobros reales se conectan después)
-- Arquitectura lista para conectar Stripe, WhatsApp Cloud API y una base de datos
+## 1. Render
+Variables de entorno:
+- OPENAI_API_KEY = tu clave actual
+- SUPABASE_URL = Project URL de Supabase
+- SUPABASE_PUBLISHABLE_KEY = Publishable key de Supabase
 
-## Ejecutar
-1. Instala Node.js 20+.
-2. Copia `.env.example` como `.env`.
-3. Coloca tu `OPENAI_API_KEY`.
-4. Ejecuta `npm install`.
-5. Ejecuta `npm start`.
-6. Abre `http://localhost:3000`.
+Compatibilidad: el servidor también acepta SUPABASE_ANON_KEY si ya tienes esa variable configurada.
 
-La clave de API queda en el servidor y no en el navegador.
+## 2. Supabase
+Abre **SQL Editor > New query**, pega el contenido de `supabase.sql` y pulsa **Run**. Esto crea la tabla `campaigns`, activa RLS y permite que cada usuario vea/cree/elimine únicamente sus propias campañas.
 
-## Siguiente etapa de producción
-- PostgreSQL/Supabase para usuarios y campañas.
-- Auth real (Clerk/Auth.js/Supabase Auth).
-- Stripe para suscripciones.
-- WhatsApp Cloud API para recibir/enviar mensajes.
-- Almacenamiento S3/R2 para imágenes.
-- Analytics de Meta Ads/TikTok Ads.
+## 3. Auth
+En Supabase > Authentication > Providers, deja habilitado Email. Para pruebas puedes desactivar temporalmente la confirmación de correo; en producción conviene mantenerla activada.
+
+## 4. Despliegue
+Sube estos archivos a GitHub y Render hará el deploy con `npm install` y `npm start`.
