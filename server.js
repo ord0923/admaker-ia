@@ -19,8 +19,10 @@ const supabaseAdmin = supabaseUrl && supabaseSecretKey ? createClient(supabaseUr
 const mercadopagoAccessToken = process.env.MERCADOPAGO_ACCESS_TOKEN || '';
 const mercadopagoWebhookSecret = process.env.MERCADOPAGO_WEBHOOK_SECRET || '';
 const mercadopagoWebhookTestSecret = process.env.MERCADOPAGO_WEBHOOK_TEST_SECRET || mercadopagoWebhookSecret;
-const MERCADOPAGO_PRO_PLAN_ID = process.env.MERCADOPAGO_PRO_PLAN_ID || 'a7644d6f5e2340babf72d40f4f1b9ffd';
-const MERCADOPAGO_BUSINESS_PLAN_ID = process.env.MERCADOPAGO_BUSINESS_PLAN_ID || '1978631b9d3d4a08a9de9e6dbb18124d';
+const MERCADOPAGO_PRO_PLAN_ID = process.env.MERCADOPAGO_PRO_PLAN_ID || '';
+const MERCADOPAGO_BUSINESS_PLAN_ID = process.env.MERCADOPAGO_BUSINESS_PLAN_ID || '';
+const MERCADOPAGO_PRO_PLAN_NAME = 'AdMaker IA PRO';
+const MERCADOPAGO_BUSINESS_PLAN_NAME = 'AdMaker IA BUSINESS';
 const FREE_MONTHLY_LIMIT = 3;
 const PLAN_LIMITS = { FREE: 3, PRO: 50, BUSINESS: 200 };
 
@@ -75,8 +77,24 @@ function normalizePlan(value) {
 }
 
 async function accountState(userId) {
-  const rows = await supabaseRest(`subscriptions?select=id,mp_subscription_id,mp_plan_id,plan,status,payer_email,updated_at&user_id=eq.${encodeURIComponent(userId)}&order=updated_at.desc&limit=20`);
-  const active = (rows || []).find(r => normalizePlan(r.plan) !== 'FREE' && String(r.status).toLowerCase() === 'authorized');
+  let rows = await supabaseRest(`subscriptions?select=id,mp_subscription_id,mp_plan_id,plan,status,payer_email,updated_at&user_id=eq.${encodeURIComponent(userId)}&order=updated_at.desc&limit=20`);
+  let active = (rows || []).find(r => normalizePlan(r.plan) !== 'FREE' && String(r.status).toLowerCase() === 'authorized');
+
+  // Self-heal: if the webhook was missed or arrived before the real plan IDs
+  // were known, ask Mercado Pago for this user's active subscription and sync it.
+  if (!active && mercadopagoAccessToken && supabaseAdmin) {
+    try {
+      const { data: userData } = await supabaseAdmin.auth.admin.getUserById(userId);
+      const synced = await syncUserSubscriptionFromMercadoPago(userData?.user || null);
+      if (synced?.matched) {
+        rows = await supabaseRest(`subscriptions?select=id,mp_subscription_id,mp_plan_id,plan,status,payer_email,updated_at&user_id=eq.${encodeURIComponent(userId)}&order=updated_at.desc&limit=20`);
+        active = (rows || []).find(r => normalizePlan(r.plan) !== 'FREE' && String(r.status).toLowerCase() === 'authorized');
+      }
+    } catch (e) {
+      console.warn('MP_ACCOUNT_SELF_HEAL_ERROR', String(e));
+    }
+  }
+
   const plan = active ? normalizePlan(active.plan) : 'FREE';
   return { plan, limit: PLAN_LIMITS[plan], subscription: active || null };
 }
@@ -143,17 +161,85 @@ async function findAuthUserByEmail(email) {
   return null;
 }
 
-function planFromMercadoPagoPlanId(planId) {
-  if (String(planId) === String(MERCADOPAGO_PRO_PLAN_ID)) return 'PRO';
-  if (String(planId) === String(MERCADOPAGO_BUSINESS_PLAN_ID)) return 'BUSINESS';
+let mpPlanCache = { expiresAt: 0, plans: null };
+
+function planFromMercadoPagoPlanId(planId, catalog = null) {
+  const id = String(planId || '');
+  if (id && MERCADOPAGO_PRO_PLAN_ID && id === String(MERCADOPAGO_PRO_PLAN_ID)) return 'PRO';
+  if (id && MERCADOPAGO_BUSINESS_PLAN_ID && id === String(MERCADOPAGO_BUSINESS_PLAN_ID)) return 'BUSINESS';
+  if (catalog) {
+    if (catalog.PRO?.id && id === String(catalog.PRO.id)) return 'PRO';
+    if (catalog.BUSINESS?.id && id === String(catalog.BUSINESS.id)) return 'BUSINESS';
+  }
   return 'FREE';
 }
 
-async function saveSubscriptionFromMercadoPago(subscription) {
-  const plan = planFromMercadoPagoPlanId(subscription.preapproval_plan_id);
+function normalizeText(v) {
+  return String(v || '').trim().toLowerCase();
+}
+
+async function resolveMercadoPagoPlanCatalog(force = false) {
+  if (!mercadopagoAccessToken) return {
+    PRO: { id: MERCADOPAGO_PRO_PLAN_ID || '' },
+    BUSINESS: { id: MERCADOPAGO_BUSINESS_PLAN_ID || '' }
+  };
+  if (!force && mpPlanCache.plans && Date.now() < mpPlanCache.expiresAt) return mpPlanCache.plans;
+
+  const [proData, businessData, allData] = await Promise.all([
+    mercadoPagoGet(`/preapproval_plan/search?status=active&q=${encodeURIComponent(MERCADOPAGO_PRO_PLAN_NAME)}`),
+    mercadoPagoGet(`/preapproval_plan/search?status=active&q=${encodeURIComponent(MERCADOPAGO_BUSINESS_PLAN_NAME)}`),
+    mercadoPagoGet('/preapproval_plan/search?status=active')
+  ]);
+  const results = Array.isArray(allData?.results) ? allData.results : [];
+  const proResults = Array.isArray(proData?.results) ? proData.results : [];
+  const businessResults = Array.isArray(businessData?.results) ? businessData.results : [];
+  const findPlan = (name, price, externalReference, targetedResults) => {
+    const pool = targetedResults.length ? targetedResults : results;
+    const exact = pool.find(p => normalizeText(p.reason) === normalizeText(name));
+    if (exact) return exact;
+    const ref = pool.find(p => normalizeText(p.external_reference) === normalizeText(externalReference));
+    if (ref) return ref;
+    return results.find(p => Number(p?.auto_recurring?.transaction_amount) === price && String(p?.auto_recurring?.frequency_type || '').toLowerCase() === 'months');
+  };
+
+  const pro = findPlan(MERCADOPAGO_PRO_PLAN_NAME, 29900, 'ADMAKER_PRO', proResults);
+  const business = findPlan(MERCADOPAGO_BUSINESS_PLAN_NAME, 79900, 'ADMAKER_BUSINESS', businessResults);
+  const catalog = {
+    PRO: { id: pro?.id || MERCADOPAGO_PRO_PLAN_ID || '', reason: pro?.reason || MERCADOPAGO_PRO_PLAN_NAME },
+    BUSINESS: { id: business?.id || MERCADOPAGO_BUSINESS_PLAN_ID || '', reason: business?.reason || MERCADOPAGO_BUSINESS_PLAN_NAME }
+  };
+  mpPlanCache = { plans: catalog, expiresAt: Date.now() + 5 * 60 * 1000 };
+  console.log('MP_PLAN_CATALOG', JSON.stringify({ PRO: catalog.PRO.id ? '[id encontrado]' : '[sin id]', BUSINESS: catalog.BUSINESS.id ? '[id encontrado]' : '[sin id]' }));
+  return catalog;
+}
+
+async function syncUserSubscriptionFromMercadoPago(user) {
+  const email = String(user?.email || '').trim();
+  if (!email || !mercadopagoAccessToken) return { matched: false, reason: 'missing_email_or_token' };
+  const catalog = await resolveMercadoPagoPlanCatalog();
+  const query = `/preapproval/search?status=authorized&payer_email=${encodeURIComponent(email)}&limit=100`;
+  const data = await mercadoPagoGet(query);
+  const results = Array.isArray(data?.results) ? data.results : [];
+  if (!results.length) return { matched: false, reason: 'no_authorized_subscription' };
+
+  const ranked = results
+    .map(sub => ({ sub, plan: planFromMercadoPagoPlanId(sub.preapproval_plan_id, catalog) }))
+    .filter(x => x.plan !== 'FREE')
+    .sort((a, b) => new Date(b.sub.date_created || 0) - new Date(a.sub.date_created || 0));
+
+  if (!ranked.length) {
+    console.warn('MP_SUBSCRIPTION_UNRECOGNIZED_PLAN', JSON.stringify({ email: '[oculto]', candidates: results.map(r => String(r.preapproval_plan_id || '')).filter(Boolean) }));
+    return { matched: false, reason: 'unrecognized_plan' };
+  }
+
+  return saveSubscriptionFromMercadoPago(ranked[0].sub, ranked[0].plan, catalog, user);
+}
+
+async function saveSubscriptionFromMercadoPago(subscription, knownPlan = '', catalog = null, matchedUser = null) {
+  const plan = knownPlan || planFromMercadoPagoPlanId(subscription.preapproval_plan_id, catalog || await resolveMercadoPagoPlanCatalog());
   const status = String(subscription.status || 'pending').toLowerCase();
-  const payerEmail = subscription.payer_email || subscription.payer_email_address || '';
-  const user = await findAuthUserByEmail(payerEmail);
+  const payerEmail = subscription.payer_email || subscription.payer_email_address || matchedUser?.email || '';
+  const user = matchedUser || await findAuthUserByEmail(payerEmail);
   if (!user) {
     console.warn('MP_USER_NOT_FOUND', payerEmail ? '[email recibido, usuario no encontrado]' : '[sin email]');
     return { matched: false, plan, status };
@@ -181,10 +267,6 @@ async function processMercadoPagoWebhook(req) {
   const dataId = String(req.query['data.id'] || req.body?.data?.id || '');
   if (!dataId) return { ignored: true, reason: 'missing_data_id' };
 
-  if (dataId === '123456') {
-  return { simulated: true, type, data_id: dataId };
-}
-
   if (type === 'subscription_preapproval') {
     const subscription = await mercadoPagoGet(`/preapproval/${encodeURIComponent(dataId)}`);
     return saveSubscriptionFromMercadoPago(subscription);
@@ -203,10 +285,29 @@ async function processMercadoPagoWebhook(req) {
 app.get('/api/config', (req,res)=>res.json({ supabaseUrl, supabaseAnonKey: supabasePublishableKey, configured:Boolean(supabaseUrl && supabasePublishableKey) }));
 
 app.get('/api/plans', requireUser, async (req,res)=>{
-  res.json({
-    PRO: { name:'PRO', price:29900, limit:50, planId:MERCADOPAGO_PRO_PLAN_ID, checkoutUrl:`https://www.mercadopago.com.co/subscriptions/checkout?preapproval_plan_id=${encodeURIComponent(MERCADOPAGO_PRO_PLAN_ID)}` },
-    BUSINESS: { name:'BUSINESS', price:79900, limit:200, planId:MERCADOPAGO_BUSINESS_PLAN_ID, checkoutUrl:`https://www.mercadopago.com.co/subscriptions/checkout?preapproval_plan_id=${encodeURIComponent(MERCADOPAGO_BUSINESS_PLAN_ID)}` }
-  });
+  try {
+    const catalog = await resolveMercadoPagoPlanCatalog();
+    const proId = catalog.PRO.id;
+    const businessId = catalog.BUSINESS.id;
+    res.json({
+      PRO: { name:'PRO', price:29900, limit:50, planId:proId, checkoutUrl:proId ? `https://www.mercadopago.com.co/subscriptions/checkout?preapproval_plan_id=${encodeURIComponent(proId)}` : '' },
+      BUSINESS: { name:'BUSINESS', price:79900, limit:200, planId:businessId, checkoutUrl:businessId ? `https://www.mercadopago.com.co/subscriptions/checkout?preapproval_plan_id=${encodeURIComponent(businessId)}` : '' }
+    });
+  } catch (e) {
+    console.error('API_PLANS_ERROR', String(e));
+    res.status(500).json({error:'No se pudieron consultar los planes de Mercado Pago.'});
+  }
+});
+
+app.post('/api/mercadopago/sync', requireUser, async (req,res)=>{
+  try {
+    const result = await syncUserSubscriptionFromMercadoPago(req.user);
+    const account = await accountState(req.user.id);
+    res.json({ok:true, sync:result, plan:account.plan, limit:account.limit});
+  } catch (e) {
+    console.error('API_MP_SYNC_ERROR', String(e));
+    res.status(500).json({error:'No se pudo sincronizar tu suscripción.'});
+  }
 });
 
 app.get('/api/me', requireUser, async (req,res)=>{
@@ -289,3 +390,4 @@ app.post('/api/mercadopago/webhook', async (req,res)=>{
 
 app.use((req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 app.listen(port,'0.0.0.0',()=>console.log(`AdMaker IA running on port ${port}`));
+
