@@ -15,11 +15,14 @@ const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || '';
 const supabaseAuth = supabaseUrl && supabasePublishableKey ? createClient(supabaseUrl, supabasePublishableKey) : null;
 const supabaseAdmin = supabaseUrl && supabaseSecretKey ? createClient(supabaseUrl, supabaseSecretKey) : null;
 const FREE_MONTHLY_LIMIT = 3;
-console.log('FINAL_SUPABASE_TEST', {
-  supabaseUrlConfigured: Boolean(supabaseUrl),
-  publishableKeyConfigured: Boolean(supabasePublishableKey),
-  secretKeyConfigured: Boolean(supabaseSecretKey)
-});
+console.log(
+  'FINAL_SUPABASE_TEST url=' +
+  Boolean(supabaseUrl) +
+  ' publishable=' +
+  Boolean(supabasePublishableKey) +
+  ' secret=' +
+  Boolean(supabaseSecretKey)
+);
 
 app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
