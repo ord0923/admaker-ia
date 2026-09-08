@@ -83,4 +83,4 @@ app.post('/api/generate-image', async (req,res)=>{
 app.get('/api/campaigns',(req,res)=>res.json(demoCampaigns));
 
 app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
-app.listen(port,()=>console.log(`AdMaker IA Pro: http://localhost:${port}`));
+app.listen(port, '0.0.0.0', () => console.log(`AdMaker IA Pro running on port ${port}`));
