@@ -18,6 +18,7 @@ const supabaseAdmin = supabaseUrl && supabaseSecretKey ? createClient(supabaseUr
 
 const mercadopagoAccessToken = process.env.MERCADOPAGO_ACCESS_TOKEN || '';
 const mercadopagoWebhookSecret = process.env.MERCADOPAGO_WEBHOOK_SECRET || '';
+const mercadopagoWebhookTestSecret = process.env.MERCADOPAGO_WEBHOOK_TEST_SECRET || mercadopagoWebhookSecret;
 const MERCADOPAGO_PRO_PLAN_ID = process.env.MERCADOPAGO_PRO_PLAN_ID || 'a7644d6f5e2340babf72d40f4f1b9ffd';
 const MERCADOPAGO_BUSINESS_PLAN_ID = process.env.MERCADOPAGO_BUSINESS_PLAN_ID || '1978631b9d3d4a08a9de9e6dbb18124d';
 const FREE_MONTHLY_LIMIT = 3;
@@ -106,7 +107,9 @@ async function mercadoPagoGet(pathname) {
 }
 
 function validWebhookSignature(req) {
-  if (!mercadopagoWebhookSecret) return false;
+  const liveMode = req.query.live_mode ?? req.body?.live_mode;
+  const secret = String(liveMode) === 'false' ? mercadopagoWebhookTestSecret : mercadopagoWebhookSecret;
+  if (!secret) return false;
   const xSignature = req.headers['x-signature'];
   const xRequestId = req.headers['x-request-id'] || '';
   const dataId = req.query['data.id'] || req.body?.data?.id || '';
@@ -118,7 +121,7 @@ function validWebhookSignature(req) {
   }, {});
   if (!parts.ts || !parts.v1) return false;
   const manifest = `id:${dataId};request-id:${xRequestId};ts:${parts.ts};`;
-  const expected = crypto.createHmac('sha256', mercadopagoWebhookSecret).update(manifest).digest('hex');
+  const expected = crypto.createHmac('sha256', secret).update(manifest).digest('hex');
   const a = Buffer.from(expected, 'utf8');
   const b = Buffer.from(parts.v1, 'utf8');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
